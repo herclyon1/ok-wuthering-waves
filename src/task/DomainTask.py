@@ -1,7 +1,7 @@
 import re
 
 
-from ok import Logger
+from ok import Logger, WaitFailedException
 from src.task.BaseCombatTask import BaseCombatTask, NotInCombatException, CharDeadException
 from src.task.WWOneTimeTask import WWOneTimeTask
 
@@ -89,8 +89,12 @@ class DomainTask(WWOneTimeTask, BaseCombatTask):
                 self.sleep(3)
                 self.walk_to_treasure()
                 self.pick_f(handle_claim=False)
-            except (NotInCombatException, CharDeadException):
-                self.log_info('farm_in_domain: death recovered, exiting domain')
+            except (NotInCombatException, CharDeadException, WaitFailedException):
+                # WaitFailedException: 副本没打通（限时结束 / 敌人没清完）就不会掉宝箱，
+                # walk_to_treasure 找不到目标会抛它。和死亡一样当成“这一局没打成”，
+                # 交给 farm_domain_with_recovery_loop 重进；否则它会一路抛到
+                # DailyTask.run，把后面的领奖和附加任务全带走。
+                self.log_info('farm_in_domain: attempt failed, exiting domain')
                 self.make_sure_in_world()
                 return False, must_use
             can_continue, used = self.use_stamina(once=self.stamina_once, must_use=must_use)
