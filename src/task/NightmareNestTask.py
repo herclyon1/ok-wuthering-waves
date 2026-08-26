@@ -32,6 +32,7 @@ class NightmareNestTask(WWOneTimeTask, BaseCombatTask):
         self._capture_success = False
         self._capture_mode = False
         self._unreachable_nests = set()
+        self._attempted_nests = set()
         self._nest_tab_of_current_nest = 'go_nest'
         self.default_config.update({'Which to Farm': ['Nightmare Purification', 'Tacet Discord Nest']})
         self.config_type['Which to Farm'] = {'type': "multi_selection",
@@ -41,23 +42,48 @@ class NightmareNestTask(WWOneTimeTask, BaseCombatTask):
         self._capture_mode = False
         self._capture_success = False
         self._unreachable_nests.clear()
+        self._attempted_nests.clear()
         WWOneTimeTask.run(self)
         self.ensure_main(time_out=30)
         self._init_queue()
         self.log_info('opened gray_book_boss')
-        while nest := self.get_nest_to_go():
+        while nest := self._next_nest_with_progress():
             self.combat_nest(nest)
         self.ensure_main(time_out=30)
+
+    def _next_nest_with_progress(self):
+        """取下一个巢穴；同一个巢穴打完计数没动就不再重试。
+
+        `find_nest()` 只挑「已击败 0/N」的巢穴，所以只要一局打完计数没涨，
+        下一轮它还会被选中——形成无限循环。队伍打不过挑战时最明显：
+        游戏弹「挑战失败」（提示提升角色/武器/声骸/技能等级），
+        而这个界面 OK-WW 并不认识，于是每两分钟原地重进一次，永不放弃。
+
+        这里不去识别失败界面（多一个模板就多一处会随版本失效的地方），
+        而是用「打完一局计数没变」这个**结果**判定：无论打不过、没刷新、
+        还是传送点不对，都一视同仁地跳过，把时间让给下一个巢穴。
+        """
+        while nest := self.get_nest_to_go():
+            key = nest.cache_key if isinstance(nest, NestTarget) else None
+            if key is None:
+                return nest                 # 认不出身份的目标，交给原有流程
+            if key in self._attempted_nests:
+                self._unreachable_nests.add(key)
+                self.log_info(f'nightmare nest: no progress after an attempt, skip: {key}')
+                continue                    # 下一轮 find_nest 会跳过它
+            self._attempted_nests.add(key)
+            return nest
 
     def run_capture_mode(self):
         self._capture_mode = True
         self._capture_success = False
         self._unreachable_nests.clear()
+        self._attempted_nests.clear()
         WWOneTimeTask.run(self)
         self.ensure_main(time_out=30)
         self._init_queue()
         self.log_info('opened gray_book_boss')
-        while nest := self.get_nest_to_go():
+        while nest := self._next_nest_with_progress():
             self.combat_nest(nest)
             if self._capture_success:
                 break
