@@ -15,6 +15,9 @@ CONFIRM_FEATURES = ['confirm_btn_hcenter_vcenter', 'confirm_btn_highlight_hcente
 class NestTarget:
     box: object
     cache_key: str
+    # 已击败数。允许续刷未清空的点位之后，同一个 cache_key 会反复出现，
+    # 靠它才能分清「打出了进展」和「原地空转」。
+    progress: str = ""
 
 
 class NightmareNestTask(WWOneTimeTask, BaseCombatTask):
@@ -54,7 +57,7 @@ class NightmareNestTask(WWOneTimeTask, BaseCombatTask):
     def _next_nest_with_progress(self):
         """取下一个巢穴；同一个巢穴打完计数没动就不再重试。
 
-        `find_nest()` 只挑「已击败 0/N」的巢穴，所以只要一局打完计数没涨，
+        `find_nest()` 会一直挑没打满的巢穴，所以一局打完计数没涨的话，
         下一轮它还会被选中——形成无限循环。队伍打不过挑战时最明显：
         游戏弹「挑战失败」（提示提升角色/武器/声骸/技能等级），
         而这个界面 OK-WW 并不认识，于是每两分钟原地重进一次，永不放弃。
@@ -64,14 +67,16 @@ class NightmareNestTask(WWOneTimeTask, BaseCombatTask):
         还是传送点不对，都一视同仁地跳过，把时间让给下一个巢穴。
         """
         while nest := self.get_nest_to_go():
-            key = nest.cache_key if isinstance(nest, NestTarget) else None
-            if key is None:
+            if not isinstance(nest, NestTarget):
                 return nest                 # 认不出身份的目标，交给原有流程
-            if key in self._attempted_nests:
-                self._unreachable_nests.add(key)
-                self.log_info(f'nightmare nest: no progress after an attempt, skip: {key}')
+            # 键里带上进度：打出了进展就是新的一次机会，原地不动才算白打。
+            stamp = f'{nest.cache_key}@{nest.progress}'
+            if stamp in self._attempted_nests:
+                self._unreachable_nests.add(nest.cache_key)
+                self.log_info('nightmare nest: no progress after an attempt, '
+                              f'skip: {nest.cache_key} (still {nest.progress})')
                 continue                    # 下一轮 find_nest 会跳过它
-            self._attempted_nests.add(key)
+            self._attempted_nests.add(stamp)
             return nest
 
     def run_capture_mode(self):
@@ -240,7 +245,12 @@ class NightmareNestTask(WWOneTimeTask, BaseCombatTask):
             for match in re.finditer(self.count_re, count_box.name):
                 numerator = match.group(1)
                 denominator = match.group(2)
-                if numerator != denominator and denominator in ['24', '36', '48', '41'] and numerator == '0':
+                # 只要没打满就能接着打，不要求「一只都没打过」。
+                # 原来这里还有一个 `numerator == '0'`：一个点位只要刷过一只，
+                # 就被永久跳过，剩下的 40 多只再也不会去打。2026-08-26 实测，
+                # 四个残象聚落刷到 10/41、6/48、48/48、24/24 之后，
+                # 任务每轮都报「没有可刷的巢穴」直接收工——两个没满的都被这行挡掉了。
+                if numerator != denominator and denominator in ['24', '36', '48', '41']:
                     cache_key = self._make_nest_cache_key(count_box, denominator)
                     if cache_key in self._unreachable_nests:
                         self.log_info(f'skip cached unreachable nightmare nest: {cache_key}')
@@ -250,7 +260,7 @@ class NightmareNestTask(WWOneTimeTask, BaseCombatTask):
                     count_box.y -= count_box.height * 0.9
                     count_box.height = 1
                     count_box.width = 1
-                    return NestTarget(count_box, cache_key)
+                    return NestTarget(count_box, cache_key, numerator)
 
     def _make_nest_cache_key(self, count_box, denominator):
         action_name = self.queues[0].__name__ if self.queues else 'unknown'

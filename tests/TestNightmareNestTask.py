@@ -194,7 +194,7 @@ class TestNightmareNestTask(unittest.TestCase):
         find_nest 只挑「已击败 0/N」的巢穴，所以一局打完计数没涨的话，
         下一轮还会选中同一个，两分钟一轮地空转。
         """
-        stuck = NestTarget(FakeBox('0/36', y=300), 'go_nightmare:36:15')
+        stuck = NestTarget(FakeBox('0/36', y=300), 'go_nightmare:36:15', '0')
         task = self._task_with_nests([stuck])
 
         first = task._next_nest_with_progress()
@@ -206,8 +206,8 @@ class TestNightmareNestTask(unittest.TestCase):
         self.assertTrue(any('no progress' in log for log in task.logs))
 
     def test_skipping_a_stuck_nest_moves_on_to_the_next_one(self):
-        stuck = NestTarget(FakeBox('0/36', y=300), 'go_nightmare:36:15')
-        other = NestTarget(FakeBox('0/48', y=400), 'go_nest:48:20')
+        stuck = NestTarget(FakeBox('0/36', y=300), 'go_nightmare:36:15', '0')
+        other = NestTarget(FakeBox('0/48', y=400), 'go_nest:48:20', '0')
         task = self._task_with_nests([stuck, other])
 
         self.assertIs(task._next_nest_with_progress(), stuck)
@@ -217,14 +217,46 @@ class TestNightmareNestTask(unittest.TestCase):
 
     def test_a_nest_that_made_progress_is_not_blacklisted(self):
         """打完计数涨了，find_nest 就不会再吐同一个 key，正常继续。"""
-        first = NestTarget(FakeBox('0/36', y=300), 'go_nightmare:36:15')
-        after = NestTarget(FakeBox('0/48', y=400), 'go_nest:48:20')
+        first = NestTarget(FakeBox('0/36', y=300), 'go_nightmare:36:15', '0')
+        after = NestTarget(FakeBox('0/48', y=400), 'go_nest:48:20', '0')
         task = self._task_with_nests([first])
 
         self.assertIs(task._next_nest_with_progress(), first)
         task._pending[:] = [after]                       # 计数涨了，换成别的目标
         self.assertIs(task._next_nest_with_progress(), after)
         self.assertEqual(set(), task._unreachable_nests)
+
+    def test_partially_farmed_nest_is_still_offered(self):
+        """打过一部分的点位要能接着打——原来只认「已击败 0/N」。"""
+        task = NightmareNestTask.__new__(NightmareNestTask)
+        task.queues = [lambda: None]
+        task.count_re = re.compile(r"(\d{1,2})/(\d{1,2})")
+        task._unreachable_nests = set()
+        task.logs = []
+        task.log_info = lambda msg, **kwargs: task.logs.append(msg)
+        task.width_of_screen = lambda v: 1920 * v
+        task.height_of_screen = lambda v: 1080 * v
+        task.ocr = lambda *a, **k: [FakeBox('已击败残象：10/41', y=300)]
+
+        target = task.find_nest()
+        self.assertIsInstance(target, NestTarget)
+        self.assertEqual('10', target.progress)
+
+    def test_progress_gives_the_nest_another_attempt(self):
+        """计数涨了就不算白打，要再给一次机会；没涨才拉黑。"""
+        first = NestTarget(FakeBox('6/48', y=400), 'go_nest:48:20', '6')
+        task = self._task_with_nests([first])
+        self.assertIs(task._next_nest_with_progress(), first)
+
+        grown = NestTarget(FakeBox('12/48', y=400), 'go_nest:48:20', '12')
+        task._pending[:] = [grown]
+        self.assertIs(task._next_nest_with_progress(), grown)
+        self.assertEqual(set(), task._unreachable_nests)
+
+        same = NestTarget(FakeBox('12/48', y=400), 'go_nest:48:20', '12')
+        task._pending[:] = [same]
+        self.assertIsNone(task._next_nest_with_progress())
+        self.assertIn('go_nest:48:20', task._unreachable_nests)
 
     def test_attempt_memory_is_cleared_between_runs(self):
         """上一轮拉黑的巢穴，下一轮（比如第二天）要重新给机会。"""
