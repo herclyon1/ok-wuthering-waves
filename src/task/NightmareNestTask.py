@@ -7,6 +7,21 @@ from src.task.BaseCombatTask import BaseCombatTask, CharRevivedException
 from src.task.WWOneTimeTask import WWOneTimeTask
 
 logger = Logger.get_logger(__name__)
+# 只刷指定点位。上游没有这个能力：find_nest 扫到哪个算哪个，
+# 想单独补某一个没打满的点位做不到（见 ok-oldking/ok-wuthering-waves#1622）。
+ONLY_NESTS = 'Only Farm These Nests'
+# 等点位列表渲染出来的秒数上限。够长能盖住加载慢，
+# 又不至于在列表真的空时把任务拖死。
+NEST_LIST_TIMEOUT = 15
+# 计数框允许比名字框低几个行高（同一张卡片内）。
+# 2026-08-27 在游戏里实测的坐标：
+#     落渊南丘残象聚落  y=300 h=35  → 行中心 317.5
+#     已击败残象：0/41  y=373 h=30  → 行中心 388.0     差 70.5px ≈ 2.35 行高
+#     下一个点位 盲望之塌 y=523              距南丘名字 148px ≈ 4.9 行高
+# 所以 4 行高（120px）既盖得住 2.35，又够不到 4.9，不会串到下一个点位。
+# 原来写死 1 行高，永远配不上——名字和计数根本不在同一行。
+NEST_ROW_SPAN = 4
+
 TRAVEL_FEATURES = ['fast_travel_custom', 'gray_teleport', 'remove_custom']
 CONFIRM_FEATURES = ['confirm_btn_hcenter_vcenter', 'confirm_btn_highlight_hcenter_vcenter']
 
@@ -37,9 +52,13 @@ class NightmareNestTask(WWOneTimeTask, BaseCombatTask):
         self._unreachable_nests = set()
         self._attempted_nests = set()
         self._nest_tab_of_current_nest = 'go_nest'
-        self.default_config.update({'Which to Farm': ['Nightmare Purification', 'Tacet Discord Nest']})
+        self.default_config.update({'Which to Farm': ['Nightmare Purification', 'Tacet Discord Nest'],
+                                    ONLY_NESTS: ''})
         self.config_type['Which to Farm'] = {'type': "multi_selection",
                                              'options': ['Nightmare Purification', 'Tacet Discord Nest']}
+        self.config_description[ONLY_NESTS] = (
+            '只刷指定的点位，填名字里认得出的一段即可，多个用逗号隔开，'
+            '例如「落渊南丘」。留空＝按原来的行为刷全部。')
 
     def run(self):
         self._capture_mode = False
@@ -239,9 +258,64 @@ class NightmareNestTask(WWOneTimeTask, BaseCombatTask):
     def go_nest(self):
         self.open_boss_book('canxiang')
 
+    def _wanted_nest_rows(self):
+        """配置了「只刷指定点位」时，那些点位各自在第几行（返回行中心的 y）。
+
+        名字和计数属于同一张卡片，但**不在同一行**——实测计数在名字下方
+        两行多（见 NEST_ROW_SPAN 的注释）。所以先按名字定位到行，
+        再在下方 NEST_ROW_SPAN 个行高之内去认它的计数框。
+        返回 None 表示没配置，照旧刷全部。
+        """
+        raw = (self.config.get(ONLY_NESTS) or '').strip()
+        if not raw:
+            return None
+        names = [n.strip() for n in re.split(r'[,，]', raw) if n.strip()]
+        # 点进列表之后它还要渲染一会儿。2026-08-27 实测：点击后才 2 秒就 OCR，
+        # 一个名字都读不到，于是判定「找不到指定点位」→ find_nest 直接返回 None
+        # → 残像聚落整段跳过，那天一次都没刷。所以先等列表真的出来。
+        # 「出来了」的判据是能读到任意一个「x/y」计数，不是等固定秒数。
+        for _ in range(NEST_LIST_TIMEOUT):
+            if self.ocr(0.35, 0.13, 1, 0.96, match=self.count_re):
+                break
+            self.sleep(1)
+        # 用**包含**匹配，不能用 ocr(match=...)：那个是精确相等。
+        # 2026-08-27 实测，OCR 读出来的是「落渊南丘残象聚落」，
+        # 而配置里写的是「落渊南丘」——精确匹配一个都对不上，
+        # 于是判成「列表里没有这个点位」，整段跳过，那天一次没刷。
+        boxes = self.ocr(0.35, 0.13, 1, 0.96)
+        rows = []
+        for name in names:
+            for box in boxes:
+                if name in (box.name or ''):
+                    rows.append(box.y + box.height / 2)
+        if not rows:
+            # 这不是「打满了」，是「配的名字根本不在列表里」，两者后果一样
+            # （什么都不刷）但原因完全不同，必须让人看见，不能只写进日志。
+            seen = [b.name for b in boxes]
+            self.log_error('nightmare nest: 列表里没找到指定的点位 '
+                           f'{names}；实际读到的是 {seen}', notify=True)
+        return rows
+
     def find_nest(self):
+        wanted_rows = self._wanted_nest_rows()
+        if wanted_rows is not None and not wanted_rows:
+            return None                     # 指定了，但一个都没在列表里 → 什么都别刷
+        hit_wanted = False
         counts = self.ocr(0.35, 0.13, 1, 0.96, match=self.count_re)
         for count_box in counts:
+            if wanted_rows is not None:
+                row = count_box.y + count_box.height / 2
+                # 名字和计数属于同一张卡片，但不一定在同一行——计数常在
+                # 名字下面一两行。所以只认「计数在名字下方 NEST_ROW_SPAN
+                # 个行高以内」，既能跨行，又不会串到下一个点位上去。
+                # 具体数值由上面那条几何日志量出来，不是拍脑袋。
+                span = count_box.height * NEST_ROW_SPAN
+                if not any(-count_box.height <= row - w <= span
+                           for w in wanted_rows):
+                    self.log_debug(f'nightmare nest: 计数 {count_box.name} '
+                                   f'(y={row}) 不属于任何指定点位 {wanted_rows}')
+                    continue
+                hit_wanted = True
             for match in re.finditer(self.count_re, count_box.name):
                 numerator = match.group(1)
                 denominator = match.group(2)
@@ -261,6 +335,8 @@ class NightmareNestTask(WWOneTimeTask, BaseCombatTask):
                     count_box.height = 1
                     count_box.width = 1
                     return NestTarget(count_box, cache_key, numerator)
+        if wanted_rows is not None and hit_wanted:
+            self.log_info('nightmare nest: 指定点位都已打满，跳过')
 
     def _make_nest_cache_key(self, count_box, denominator):
         action_name = self.queues[0].__name__ if self.queues else 'unknown'

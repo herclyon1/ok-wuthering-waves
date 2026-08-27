@@ -26,6 +26,7 @@ class TestNightmareNestTask(unittest.TestCase):
 
     def test_capture_success_clears_combat_before_post_combat_waits(self):
         task = NightmareNestTask.__new__(NightmareNestTask)
+        task.config = {}
         task._capture_mode = True
         task._in_combat = True
         picked = []
@@ -49,6 +50,7 @@ class TestNightmareNestTask(unittest.TestCase):
         for feature_name in ('team_close', 'fast_travel_custom'):
             with self.subTest(feature_name=feature_name):
                 task = NightmareNestTask.__new__(NightmareNestTask)
+                task.config = {}
                 task._capture_mode = False
                 task._capture_success = False
                 combat_calls = []
@@ -77,6 +79,7 @@ class TestNightmareNestTask(unittest.TestCase):
 
     def test_capture_mode_does_not_check_combat_after_pickup(self):
         task = NightmareNestTask.__new__(NightmareNestTask)
+        task.config = {}
         task._capture_mode = True
         task.wait_combat = lambda **kwargs: self.fail('capture mode should leave after obtaining an echo')
 
@@ -84,6 +87,7 @@ class TestNightmareNestTask(unittest.TestCase):
 
     def test_unreachable_nest_is_cached_when_travel_does_not_enter_world(self):
         task = NightmareNestTask.__new__(NightmareNestTask)
+        task.config = {}
         task._unreachable_nests = set()
         backs = []
         clicks = []
@@ -109,6 +113,7 @@ class TestNightmareNestTask(unittest.TestCase):
 
     def test_travel_waits_up_to_120_seconds_for_loading(self):
         task = NightmareNestTask.__new__(NightmareNestTask)
+        task.config = {}
         task._unreachable_nests = set()
         travel = FakeBox('fast_travel_custom')
         world_waits = []
@@ -123,6 +128,7 @@ class TestNightmareNestTask(unittest.TestCase):
 
     def test_find_nest_skips_cached_unreachable_row(self):
         task = NightmareNestTask.__new__(NightmareNestTask)
+        task.config = {}
         task.count_re = re.compile(r"(\d{1,2})/(\d{1,2})")
         task.queues = [lambda: None]
         task._unreachable_nests = {'<lambda>:36:10'}
@@ -152,6 +158,7 @@ class TestNightmareNestTask(unittest.TestCase):
 
     def test_cache_key_ignores_small_ocr_position_jitter(self):
         task = NightmareNestTask.__new__(NightmareNestTask)
+        task.config = {}
         task.queues = [lambda: None]
         task.height_of_screen = lambda value: 1000 * value
 
@@ -167,6 +174,7 @@ class TestNightmareNestTask(unittest.TestCase):
         巢穴会被反复吐出来——这里照这个语义来。
         """
         task = NightmareNestTask.__new__(NightmareNestTask)
+        task.config = {}
         task._unreachable_nests = set()
         task._attempted_nests = set()
         task.logs = []
@@ -229,6 +237,7 @@ class TestNightmareNestTask(unittest.TestCase):
     def test_partially_farmed_nest_is_still_offered(self):
         """打过一部分的点位要能接着打——原来只认「已击败 0/N」。"""
         task = NightmareNestTask.__new__(NightmareNestTask)
+        task.config = {}
         task.queues = [lambda: None]
         task.count_re = re.compile(r"(\d{1,2})/(\d{1,2})")
         task._unreachable_nests = set()
@@ -261,6 +270,7 @@ class TestNightmareNestTask(unittest.TestCase):
     def test_attempt_memory_is_cleared_between_runs(self):
         """上一轮拉黑的巢穴，下一轮（比如第二天）要重新给机会。"""
         task = NightmareNestTask.__new__(NightmareNestTask)
+        task.config = {}
         task._unreachable_nests = {'go_nightmare:36:15'}
         task._attempted_nests = {'go_nightmare:36:15'}
 
@@ -275,3 +285,71 @@ class TestNightmareNestTask(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestOnlyFarmTheseNests(unittest.TestCase):
+    """只刷指定点位。判据来自 2026-08-27 在游戏里量到的真实坐标：
+
+        落渊南丘残象聚落  y=300 h=35  -> 行中心 317.5
+        已击败残象：0/41  y=373 h=30  -> 行中心 388.0   差 70.5px ≈ 2.35 行高
+        下一个点位 盲望之塌 y=523                距南丘名字 148px ≈ 4.9 行高
+    """
+
+    def _task(self, only, boxes):
+        task = NightmareNestTask.__new__(NightmareNestTask)
+        task.config = {'Only Farm These Nests': only}
+        task._unreachable_nests = set()
+        task._attempted_nests = set()
+        task.queues = []
+        task.count_re = re.compile(r"(\d{1,2})/(\d{1,2})")
+        task.log_info = lambda *a, **k: None
+        task.log_debug = lambda *a, **k: None
+        task.logged = []
+        task.log_error = lambda msg, **k: task.logged.append(msg)
+        task.sleep = lambda *a, **k: None
+        task.width_of_screen = lambda r: int(1920 * r)
+        task.height_of_screen = lambda r: int(1080 * r)
+
+        def fake_ocr(*a, **k):
+            m = k.get('match')
+            if m is None:
+                return boxes
+            # 上游的 ocr(match=...) 收字符串时是**精确相等**——
+            # 这正是「落渊南丘」对不上「落渊南丘残象聚落」的原因，
+            # 测试里必须照实模拟，否则测不出这个 bug。
+            if hasattr(m, 'search'):
+                return [b for b in boxes if m.search(b.name)]
+            return [b for b in boxes if b.name == m]
+
+        task.ocr = fake_ocr
+        return task
+
+    def _list_boxes(self):
+        return [FakeBox('落渊南丘残象聚落', x=890, y=300, height=35),
+                FakeBox('已击败残象：0/41', x=890, y=373, height=30),
+                FakeBox('盲望之塌残象聚落', x=890, y=523, height=31),
+                FakeBox('已击败残象：0/48', x=890, y=594, height=31)]
+
+    def test_matches_by_substring_not_exact_name(self):
+        task = self._task('落渊南丘', self._list_boxes())
+        self.assertTrue(task._wanted_nest_rows())
+
+    def test_counter_two_rows_below_the_name_still_pairs_up(self):
+        task = self._task('落渊南丘', self._list_boxes())
+        nest = task.find_nest()
+        self.assertIsNotNone(nest)
+
+    def test_does_not_bleed_into_the_next_nest(self):
+        task = self._task('落渊南丘', self._list_boxes())
+        self.assertEqual(1, len(task._wanted_nest_rows()))
+
+    def test_unconfigured_keeps_original_behaviour(self):
+        task = self._task('', self._list_boxes())
+        self.assertIsNone(task._wanted_nest_rows())
+
+    def test_name_absent_from_list_is_reported_not_swallowed(self):
+        # 「名字配错了」和「点位已打满」后果一样（什么都不刷），
+        # 但原因完全不同，必须报出来而不是默默跳过。
+        task = self._task('不存在的点位', self._list_boxes())
+        self.assertEqual([], task._wanted_nest_rows())
+        self.assertTrue(any('没找到指定的点位' in m for m in task.logged))
