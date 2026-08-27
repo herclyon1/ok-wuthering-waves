@@ -127,12 +127,17 @@ class DailyTask(WWOneTimeTask, BaseCombatTask):
                                                                        config=self.config)
             self.sleep(4)
 
+        # Additional tasks run before the rewards are claimed. With the
+        # original order, anything an additional task finishes - the weekly
+        # garden most obviously - leaves rewards nothing will ever collect,
+        # because claiming already happened.
+        self.run_additional_tasks()
+
         self.claim_daily()
 
         self.claim_mail()
         self.sleep(1)
         self.claim_battle_pass()
-        self.run_additional_tasks()
         self.log_info('Daily Task Completed', notify=True)
 
     def validate_additional_tasks(self):
