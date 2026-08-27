@@ -499,9 +499,33 @@ class BaseCombatTask(CombatCheck):
                 return target
         return None
 
+    # When the concerto bar never fills, has_buff() stays False for everyone,
+    # so _unbuffed_non_main_target keeps handing the turn back and forth
+    # between the two supports and the main DPS never gets on screen. The main
+    # DPS is the one character who could build concerto in the first place, so
+    # the deadlock sustains itself: the fight runs its full duration with the
+    # main DPS at zero uptime. Reported in #1626.
+    #
+    # The escape hatch is deliberately narrow: only when the character on
+    # screen is not the main DPS, and only after the main DPS has been off
+    # screen for longer than a normal rotation would ever leave it.
+    MAIN_DPS_STARVE_SECONDS = 25.0
+
+    def _starved_main_dps_target(self, candidates):
+        now = time.time()
+        starved = [char for char in candidates
+                   if char.is_main_dps
+                   and (char.last_switch_in_time < 0
+                        or now - char.last_switch_in_time > self.MAIN_DPS_STARVE_SECONDS)]
+        return self._oldest_switch_target(starved)
+
     def _choose_switch_target_by_buff_time(self, current_char, candidates):
         if not candidates:
             return current_char
+
+        if not current_char.is_main_dps:
+            if starved := self._starved_main_dps_target(candidates):
+                return starved
 
         if current_char.is_main_dps:
             lowest_buff_remaining = self._lowest_buff_remaining_target(candidates)
